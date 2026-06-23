@@ -8,12 +8,34 @@ from server import PromptServer
 from aiohttp import web
 import comfy.utils
 
-# Custom API route to serve video files from anywhere on the user's system for the frontend preview
+# Custom API route to serve video files for the frontend preview.
+# Restricted to ComfyUI's allowed directories (input, output, temp) to prevent
+# unauthenticated arbitrary file read from the host filesystem.
+_ALLOWED_ROOTS = None
+
+def _get_allowed_roots():
+    global _ALLOWED_ROOTS
+    if _ALLOWED_ROOTS is None:
+        _ALLOWED_ROOTS = tuple(
+            os.path.realpath(p)
+            for p in [
+                folder_paths.get_input_directory(),
+                folder_paths.get_output_directory(),
+                folder_paths.get_temp_directory(),
+            ]
+        )
+    return _ALLOWED_ROOTS
+
 @PromptServer.instance.routes.get("/video_ui_custom_view")
 async def custom_view(request):
     file_path = request.query.get("filename", "")
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        return web.FileResponse(file_path)
+    if not file_path:
+        return web.Response(status=400, text="filename required")
+    real_path = os.path.realpath(file_path)
+    if not any(real_path.startswith(root) for root in _get_allowed_roots()):
+        return web.Response(status=403, text="Access denied: path outside allowed directories")
+    if os.path.isfile(real_path):
+        return web.FileResponse(real_path)
     return web.Response(status=404, text="File not found")
 
 
@@ -32,9 +54,14 @@ async def upload_chunk(request):
     chunk_index = int(post.get("chunk_index"))
     total_chunks = int(post.get("total_chunks"))
 
-    upload_dir = os.path.join(folder_paths.get_input_directory(), "whatdreamscost")
+    upload_dir = os.path.realpath(os.path.join(folder_paths.get_input_directory(), "whatdreamscost"))
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, filename)
+    safe_name = os.path.basename(filename)
+    if not safe_name:
+        return web.Response(status=400, text="Invalid filename")
+    file_path = os.path.realpath(os.path.join(upload_dir, safe_name))
+    if not file_path.startswith(upload_dir + os.sep) and file_path != upload_dir:
+        return web.Response(status=403, text="Access denied: path traversal detected")
 
     # Append to file if it's not the first chunk, otherwise write new
     mode = "ab" if chunk_index > 0 else "wb"
@@ -44,7 +71,7 @@ async def upload_chunk(request):
     await loop.run_in_executor(None, _read_and_write_file_chunk, file, file_path, mode)
 
     if chunk_index == total_chunks - 1:
-        return web.json_response({"name": f"whatdreamscost/{filename}"})
+        return web.json_response({"name": f"whatdreamscost/{safe_name}"})
     return web.json_response({"status": "ok"})
 
 
