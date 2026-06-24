@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# ComfyUI node package — no test suite
+exit 0
